@@ -33,8 +33,7 @@ void T114Board::initiateShutdown(uint8_t reason) {
 #endif // NRF52_POWER_MANAGEMENT
 
 void T114Board::begin() {
-  NRF52Board::begin();
-  NRF_POWER->DCDCEN = 1;
+  NRF52BoardDCDC::begin();
 
   pinMode(PIN_VBAT_READ, INPUT);
 
