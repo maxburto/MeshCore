@@ -57,6 +57,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #ifdef PIN_BUZZER
   buzzer.begin();
   buzzer.quiet(_node_prefs->buzzer_quiet);
+  buzzer.startup();
 #endif
 
   // Initialize digital button if available
@@ -149,8 +150,14 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 
 void UITask::renderBatteryIndicator(uint16_t batteryMilliVolts) {
   // Convert millivolts to percentage
-  const int minMilliVolts = 3000; // Minimum voltage (e.g., 3.0V)
-  const int maxMilliVolts = 4200; // Maximum voltage (e.g., 4.2V)
+#ifndef BATT_MIN_MILLIVOLTS
+  #define BATT_MIN_MILLIVOLTS 3000
+#endif
+#ifndef BATT_MAX_MILLIVOLTS
+  #define BATT_MAX_MILLIVOLTS 4200
+#endif
+  const int minMilliVolts = BATT_MIN_MILLIVOLTS;
+  const int maxMilliVolts = BATT_MAX_MILLIVOLTS;
   int batteryPercentage = ((batteryMilliVolts - minMilliVolts) * 100) / (maxMilliVolts - minMilliVolts);
   if (batteryPercentage < 0) batteryPercentage = 0; // Clamp to 0%
   if (batteryPercentage > 100) batteryPercentage = 100; // Clamp to 100%
@@ -335,6 +342,15 @@ void UITask::loop() {
 
       _next_refresh = millis() + 1000;   // refresh every second
     }
+#ifdef KEEP_DISPLAY_ON_USB
+    // Opt-in: refresh the auto-off deadline while externally powered, so the
+    // timer counts from the moment external power is removed. Off by default
+    // because OLED panels burn in quickly; only enable for LCD targets or
+    // where the display is replaceable.
+    if (board.isExternalPowered()) {
+      _auto_off = millis() + AUTO_OFF_MILLIS;
+    }
+#endif
     if (millis() > _auto_off) {
       _display->turnOff();
     }
