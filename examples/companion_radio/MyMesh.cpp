@@ -131,6 +131,7 @@
 #define PUSH_CODE_CONTROL_DATA          0x8E   // v8+
 #define PUSH_CODE_CONTACT_DELETED       0x8F // used to notify client app of deleted contact when overwriting oldest
 #define PUSH_CODE_CONTACTS_FULL         0x90 // used to notify client app that contacts storage is full
+#define PUSH_CODE_LOG_RX_LONG           0x92 // a heard packet too long for one log frame, in parts
 #define PUSH_CODE_LOG_RX_KEPT           0x91 // a heard packet kept while no client could take it: snr4, rssi, age_ms(4), dropped_before(2), raw
 
 #define ERR_CODE_UNSUPPORTED_CMD        1
@@ -290,11 +291,11 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
 }
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
-  if (len + 3 > MAX_FRAME_SIZE) return;  // too long for any log frame, as before
   int8_t snr4 = (int8_t)(snr * 4);
   int8_t rssi8 = (int8_t)(rssi);
   // Sent at once only when the client can take it and nothing older is waiting, so the client gets them in heard order.
-  if (_serial->isConnected() && rx_client_active && rx_ring_count == 0) {
+  bool ready = _serial->isConnected() && rx_client_active && rx_ring_count == 0;
+  if (ready && len + 3 <= MAX_FRAME_SIZE) {
     int i = 0;
     out_frame[i++] = PUSH_CODE_LOG_RX_DATA;
     out_frame[i++] = snr4;
@@ -302,18 +303,20 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
     memcpy(&out_frame[i], raw, len);
     i += len;
     if (_serial->writeFrame(out_frame, i) > 0) return;
+    ready = false;  // the send queue is full, so this one is late
   }
-  keepRx(snr4, rssi8, raw, len);
+  keepRx(snr4, rssi8, raw, len, ready);
 }
 
-void MyMesh::keepRx(int8_t snr4, int8_t rssi, const uint8_t raw[], int len) {
-  if (len > (int)sizeof(rx_ring[0].raw)) {  // fits a live frame but not a kept one
+void MyMesh::keepRx(int8_t snr4, int8_t rssi, const uint8_t raw[], int len, bool live) {
+  if (len > (int)sizeof(rx_ring[0].raw)) {  // longer than the radio can receive: never happens, but never overrun
     rx_ring_dropped++;
     return;
   }
   if (rx_ring_count == RX_LOG_RING_SIZE) {  // full: the oldest goes
     rx_ring_head = (rx_ring_head + 1) % RX_LOG_RING_SIZE;
     rx_ring_count--;
+    rx_ring_part_offset = 0;
     rx_ring_dropped++;
   }
   KeptRx& k = rx_ring[(rx_ring_head + rx_ring_count) % RX_LOG_RING_SIZE];
@@ -321,28 +324,54 @@ void MyMesh::keepRx(int8_t snr4, int8_t rssi, const uint8_t raw[], int len) {
   k.snr4 = snr4;
   k.rssi = rssi;
   k.len = (uint8_t)len;
+  k.live = live;
   memcpy(k.raw, raw, len);
   rx_ring_count++;
 }
 
 void MyMesh::sendKeptRx() {
+  if (!_serial->isConnected()) rx_ring_part_offset = 0;  // the queue was cleared, so the packet goes again from its start
   if (rx_ring_count == 0 || !rx_client_active || !_serial->isConnected() || _serial->isWriteBusy()) return;
   const KeptRx& k = rx_ring[rx_ring_head];
-  int i = 0;
-  out_frame[i++] = PUSH_CODE_LOG_RX_KEPT;
-  out_frame[i++] = k.snr4;
-  out_frame[i++] = k.rssi;
   uint32_t age_ms = millis() - k.heard_ms;  // how long ago it was heard, as the frame goes out
-  memcpy(&out_frame[i], &age_ms, 4);
-  i += 4;
-  memcpy(&out_frame[i], &rx_ring_dropped, 2);
-  i += 2;
-  memcpy(&out_frame[i], k.raw, k.len);
-  i += k.len;
-  if (_serial->writeFrame(out_frame, i) > 0) {  // taken: the next one goes on a later loop
-    rx_ring_head = (rx_ring_head + 1) % RX_LOG_RING_SIZE;
-    rx_ring_count--;
-    rx_ring_dropped = 0;
+  int i = 0;
+  int sent = 0;
+  if (!k.live && k.len + 9 <= MAX_FRAME_SIZE) {
+    out_frame[i++] = PUSH_CODE_LOG_RX_KEPT;
+    out_frame[i++] = k.snr4;
+    out_frame[i++] = k.rssi;
+    memcpy(&out_frame[i], &age_ms, 4);
+    i += 4;
+    memcpy(&out_frame[i], &rx_ring_dropped, 2);
+    i += 2;
+    sent = k.len;
+  } else {
+    // Too long for one frame: parts in order, each saying where it starts and the packet's whole length. The flag says
+    // the radio had the link free when it heard this, so the client can count it as air just heard, unlike a kept one.
+    out_frame[i++] = PUSH_CODE_LOG_RX_LONG;
+    out_frame[i++] = k.snr4;
+    out_frame[i++] = k.rssi;
+    memcpy(&out_frame[i], &age_ms, 4);
+    i += 4;
+    memcpy(&out_frame[i], &rx_ring_dropped, 2);
+    i += 2;
+    out_frame[i++] = k.live ? 1 : 0;
+    out_frame[i++] = k.len;
+    out_frame[i++] = rx_ring_part_offset;
+    sent = k.len - rx_ring_part_offset;
+    if (sent > MAX_FRAME_SIZE - i) sent = MAX_FRAME_SIZE - i;
+  }
+  memcpy(&out_frame[i], &k.raw[rx_ring_part_offset], sent);
+  i += sent;
+  if (_serial->writeFrame(out_frame, i) > 0) {  // taken: anything more goes on a later loop
+    if (rx_ring_part_offset + sent < k.len) {
+      rx_ring_part_offset += sent;
+    } else {
+      rx_ring_part_offset = 0;
+      rx_ring_head = (rx_ring_head + 1) % RX_LOG_RING_SIZE;
+      rx_ring_count--;
+      rx_ring_dropped = 0;
+    }
   }
 }
 
@@ -946,7 +975,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
       _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _listener(NULL), _iter(0) {
   _iter_started = false;
-  rx_ring_head = rx_ring_count = 0;
+  rx_ring_head = rx_ring_count = rx_ring_part_offset = 0;
   rx_ring_dropped = 0;
   rx_client_active = false;
   _cli_rescue = false;

@@ -279,14 +279,16 @@ private:
     int8_t snr4;         // SNR times 4, as PUSH_CODE_LOG_RX_DATA carries it
     int8_t rssi;
     uint8_t len;
-    uint8_t raw[MAX_FRAME_SIZE - 9];  // the kept frame's header is 9 bytes
+    bool live;           // the client could have taken it when heard: it is here only because it needs parts
+    uint8_t raw[MAX_TRANS_UNIT];
   };
   KeptRx rx_ring[RX_LOG_RING_SIZE];
   uint8_t rx_ring_head;    // index of the oldest kept packet
   uint8_t rx_ring_count;
+  uint8_t rx_ring_part_offset;  // how much of the oldest packet's parts the client has been sent
   uint16_t rx_ring_dropped;  // packets lost since the last kept frame went out
   bool rx_client_active;   // a client has sent a command since the link came up
-  void keepRx(int8_t snr4, int8_t rssi, const uint8_t raw[], int len);
+  void keepRx(int8_t snr4, int8_t rssi, const uint8_t raw[], int len, bool live);
   void sendKeptRx();
   CayenneLPP telemetry;
 
