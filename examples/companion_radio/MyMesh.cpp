@@ -290,7 +290,14 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
   return _prefs.multi_acks;
 }
 
+#ifdef FS_PROBE
+void fsProbeOversize(float snr, float rssi, const unsigned char* raw, int len);
+#endif
+
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#ifdef FS_PROBE
+  if (len + 3 > MAX_FRAME_SIZE) fsProbeOversize(snr, rssi, raw, len);
+#endif
   int8_t snr4 = (int8_t)(snr * 4);
   int8_t rssi8 = (int8_t)(rssi);
   // Sent at once only when the client can take it and nothing older is waiting, so the client gets them in heard order.

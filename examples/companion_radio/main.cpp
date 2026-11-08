@@ -132,6 +132,10 @@ void halt() {
   bool wifi_enabled = false;   // set at boot from prefs; false also when the effective SSID is blank
 #endif
 
+#ifdef FS_PROBE
+  #include "FsProbe.h"
+#endif
+
 void setup() {
   Serial.begin(115200);
   board.begin();
@@ -158,6 +162,9 @@ void setup() {
   fast_rng.begin(radio_driver.getRngSeed());
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#ifdef FS_PROBE
+  fsProbeBeforeMount();
+#endif
   InternalFS.begin();
   #if defined(QSPIFLASH)
     if (!QSPIFlash.begin()) {
@@ -175,6 +182,9 @@ void setup() {
   #endif
   #endif
   store.begin();
+#ifdef FS_PROBE
+  fsProbeAfterStore();
+#endif
   the_mesh.begin();
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
@@ -293,6 +303,9 @@ void setup() {
 }
 
 void loop() {
+#ifdef FS_PROBE
+  fsProbeTick();
+#endif
   the_mesh.loop();
 #if defined(NRF52_PLATFORM) && defined(BLE_PIN_CODE)
   if (bluetooth_interface.bondJustSaved()) store.mirrorBonds();
