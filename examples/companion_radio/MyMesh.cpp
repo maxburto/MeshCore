@@ -289,7 +289,14 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
   return _prefs.multi_acks;
 }
 
+#ifdef FS_PROBE
+void fsProbeOversize(float snr, float rssi, const unsigned char* raw, int len);
+#endif
+
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#ifdef FS_PROBE
+  if (len + 3 > MAX_FRAME_SIZE) fsProbeOversize(snr, rssi, raw, len);
+#endif
   if (len + 3 > MAX_FRAME_SIZE) return;  // too long for any log frame, as before
   int8_t snr4 = (int8_t)(snr * 4);
   int8_t rssi8 = (int8_t)(rssi);
