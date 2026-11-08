@@ -87,6 +87,10 @@ struct AdvertPath {
   uint8_t path[MAX_PATH_SIZE];
 };
 
+#ifndef RX_LOG_RING_SIZE
+  #define RX_LOG_RING_SIZE 64  // heard packets kept while no client can take them
+#endif
+
 class MyMesh : public BaseChatMesh, public DataStoreHost {
 public:
   class Listener {
@@ -266,6 +270,24 @@ private:
 
   uint8_t cmd_frame[MAX_FRAME_SIZE + 1];
   uint8_t out_frame[MAX_FRAME_SIZE + 1];
+
+  // Heard packets kept while no client can take them: no client joined, or the link's send queue full. They go to
+  // the client later, in heard order, as PUSH_CODE_LOG_RX_KEPT with the time each was heard. A full ring drops its
+  // oldest and counts it, and the count rides on the next kept frame.
+  struct KeptRx {
+    uint32_t heard_at;   // RTC seconds when the packet was heard
+    int8_t snr4;         // SNR times 4, as PUSH_CODE_LOG_RX_DATA carries it
+    int8_t rssi;
+    uint8_t len;
+    uint8_t raw[MAX_FRAME_SIZE - 9];  // the kept frame's header is 9 bytes
+  };
+  KeptRx rx_ring[RX_LOG_RING_SIZE];
+  uint8_t rx_ring_head;    // index of the oldest kept packet
+  uint8_t rx_ring_count;
+  uint16_t rx_ring_dropped;  // packets lost since the last kept frame went out
+  bool rx_client_active;   // a client has sent a command since the link came up
+  void keepRx(int8_t snr4, int8_t rssi, const uint8_t raw[], int len);
+  void sendKeptRx();
   CayenneLPP telemetry;
 
   struct Frame {

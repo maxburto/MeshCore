@@ -131,6 +131,7 @@
 #define PUSH_CODE_CONTROL_DATA          0x8E   // v8+
 #define PUSH_CODE_CONTACT_DELETED       0x8F // used to notify client app of deleted contact when overwriting oldest
 #define PUSH_CODE_CONTACTS_FULL         0x90 // used to notify client app that contacts storage is full
+#define PUSH_CODE_LOG_RX_KEPT           0x91 // a heard packet kept while no client could take it: snr4, rssi, heard_at(4), dropped_before(2), raw
 
 #define ERR_CODE_UNSUPPORTED_CMD        1
 #define ERR_CODE_NOT_FOUND              2
@@ -289,15 +290,58 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
 }
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
-  if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE) {
+  if (len + 3 > MAX_FRAME_SIZE) return;  // too long for any log frame, as before
+  int8_t snr4 = (int8_t)(snr * 4);
+  int8_t rssi8 = (int8_t)(rssi);
+  // Sent at once only when the client can take it and nothing older is waiting, so the client gets them in heard order.
+  if (_serial->isConnected() && rx_client_active && rx_ring_count == 0) {
     int i = 0;
     out_frame[i++] = PUSH_CODE_LOG_RX_DATA;
-    out_frame[i++] = (int8_t)(snr * 4);
-    out_frame[i++] = (int8_t)(rssi);
+    out_frame[i++] = snr4;
+    out_frame[i++] = rssi8;
     memcpy(&out_frame[i], raw, len);
     i += len;
+    if (_serial->writeFrame(out_frame, i) > 0) return;
+  }
+  keepRx(snr4, rssi8, raw, len);
+}
 
-    _serial->writeFrame(out_frame, i);
+void MyMesh::keepRx(int8_t snr4, int8_t rssi, const uint8_t raw[], int len) {
+  if (len > (int)sizeof(rx_ring[0].raw)) {  // fits a live frame but not a kept one
+    rx_ring_dropped++;
+    return;
+  }
+  if (rx_ring_count == RX_LOG_RING_SIZE) {  // full: the oldest goes
+    rx_ring_head = (rx_ring_head + 1) % RX_LOG_RING_SIZE;
+    rx_ring_count--;
+    rx_ring_dropped++;
+  }
+  KeptRx& k = rx_ring[(rx_ring_head + rx_ring_count) % RX_LOG_RING_SIZE];
+  k.heard_at = getRTCClock()->getCurrentTime();
+  k.snr4 = snr4;
+  k.rssi = rssi;
+  k.len = (uint8_t)len;
+  memcpy(k.raw, raw, len);
+  rx_ring_count++;
+}
+
+void MyMesh::sendKeptRx() {
+  if (rx_ring_count == 0 || !rx_client_active || !_serial->isConnected() || _serial->isWriteBusy()) return;
+  const KeptRx& k = rx_ring[rx_ring_head];
+  int i = 0;
+  out_frame[i++] = PUSH_CODE_LOG_RX_KEPT;
+  out_frame[i++] = k.snr4;
+  out_frame[i++] = k.rssi;
+  memcpy(&out_frame[i], &k.heard_at, 4);
+  i += 4;
+  memcpy(&out_frame[i], &rx_ring_dropped, 2);
+  i += 2;
+  memcpy(&out_frame[i], k.raw, k.len);
+  i += k.len;
+  if (_serial->writeFrame(out_frame, i) > 0) {  // taken: the next one goes on a later loop
+    rx_ring_head = (rx_ring_head + 1) % RX_LOG_RING_SIZE;
+    rx_ring_count--;
+    rx_ring_dropped = 0;
   }
 }
 
@@ -901,6 +945,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
       _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _listener(NULL), _iter(0) {
   _iter_started = false;
+  rx_ring_head = rx_ring_count = 0;
+  rx_ring_dropped = 0;
+  rx_client_active = false;
   _cli_rescue = false;
   cli_command[0] = 0;
   offline_queue_len = 0;
@@ -2386,8 +2433,10 @@ void MyMesh::checkCLIRescueCmd() {
 }
 
 void MyMesh::checkSerialInterface() {
+  if (!_serial->isConnected()) rx_client_active = false;  // kept packets wait for the next client's first command
   size_t len = _serial->checkRecvFrame(cmd_frame);
   if (len > 0) {
+    rx_client_active = true;
     handleCmdFrame(len);
   } else if (_iter_started              // check if our ContactsIterator is 'running'
              && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!
@@ -2414,6 +2463,8 @@ void MyMesh::checkSerialInterface() {
 
 void MyMesh::loop() {
   BaseChatMesh::loop();
+
+  sendKeptRx();
 
   if (_cli_rescue) {
     checkCLIRescueCmd();
