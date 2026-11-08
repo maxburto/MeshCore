@@ -131,7 +131,7 @@
 #define PUSH_CODE_CONTROL_DATA          0x8E   // v8+
 #define PUSH_CODE_CONTACT_DELETED       0x8F // used to notify client app of deleted contact when overwriting oldest
 #define PUSH_CODE_CONTACTS_FULL         0x90 // used to notify client app that contacts storage is full
-#define PUSH_CODE_LOG_RX_KEPT           0x91 // a heard packet kept while no client could take it: snr4, rssi, heard_at(4), dropped_before(2), raw
+#define PUSH_CODE_LOG_RX_KEPT           0x91 // a heard packet kept while no client could take it: snr4, rssi, age_ms(4), dropped_before(2), raw
 
 #define ERR_CODE_UNSUPPORTED_CMD        1
 #define ERR_CODE_NOT_FOUND              2
@@ -317,7 +317,7 @@ void MyMesh::keepRx(int8_t snr4, int8_t rssi, const uint8_t raw[], int len) {
     rx_ring_dropped++;
   }
   KeptRx& k = rx_ring[(rx_ring_head + rx_ring_count) % RX_LOG_RING_SIZE];
-  k.heard_at = getRTCClock()->getCurrentTime();
+  k.heard_ms = millis();
   k.snr4 = snr4;
   k.rssi = rssi;
   k.len = (uint8_t)len;
@@ -332,7 +332,8 @@ void MyMesh::sendKeptRx() {
   out_frame[i++] = PUSH_CODE_LOG_RX_KEPT;
   out_frame[i++] = k.snr4;
   out_frame[i++] = k.rssi;
-  memcpy(&out_frame[i], &k.heard_at, 4);
+  uint32_t age_ms = millis() - k.heard_ms;  // how long ago it was heard, as the frame goes out
+  memcpy(&out_frame[i], &age_ms, 4);
   i += 4;
   memcpy(&out_frame[i], &rx_ring_dropped, 2);
   i += 2;
