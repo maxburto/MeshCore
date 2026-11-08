@@ -78,6 +78,9 @@ void fsProbeBeforeMount() {
   err_internal = tryMount(INTERNAL_FS);
   err_extra = tryMount(EXTRA_FS);
   if (err_internal == 0 && err_extra == 0) return;
+#ifdef FS_PROBE_CARRY_ON
+  return;  // the framework formats, and fsProbeTick reports the error every 10 s
+#endif
 
   // Stop here: going on would format and destroy the evidence. A 1200-baud touch still enters the bootloader.
   // 'c' carries on (and the framework then formats), 'd' and 'e' dump the regions again.
