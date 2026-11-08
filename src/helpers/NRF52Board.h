@@ -25,6 +25,14 @@ struct PowerMgtConfig {
 };
 #endif
 
+// A reset must not land inside a flash write. Each file system write-back flush erases a whole 4 KB page and then
+// programs it, and LittleFS's two superblock copies and its root directory all sit in the first page, so a reset between
+// the two loses the file system whole. This waits out any write in flight and holds off any new one. The caller then
+// resets or powers off. If a write never ends, the reset still happens after a few seconds.
+class Adafruit_LittleFS;
+void nrf52FlashQuiesce();
+void nrf52FlashQuiesceAlso(Adafruit_LittleFS* fs);  // another file system on the internal flash, which shares its cache
+
 class NRF52Board : public mesh::MainBoard {
 private:
   bool pwrmgt_initialised = false;
@@ -51,7 +59,7 @@ public:
   virtual void begin();
   virtual uint8_t getStartupReason() const override { return startup_reason; }
   virtual float getMCUTemperature() override;
-  virtual void reboot() override { NVIC_SystemReset(); }
+  virtual void reboot() override { nrf52FlashQuiesce(); NVIC_SystemReset(); }
   virtual void shutdownPeripherals();
   virtual void powerOff() override;
   virtual bool getBootloaderVersion(char* version, size_t max_len) override;

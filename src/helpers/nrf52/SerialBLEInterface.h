@@ -39,6 +39,7 @@ class SerialBLEInterface : public BaseSerialInterface {
   static void onSecured(uint16_t connection_handle);
   static bool onPairingPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request);
   static void onPairingComplete(uint16_t connection_handle, uint8_t auth_status);
+  static uint32_t paired_at;
   static void onBLEEvent(ble_evt_t* evt);
   static void onBleUartRX(uint16_t conn_handle);
 
@@ -66,6 +67,7 @@ public:
   void disable() override;
   bool isEnabled() const override { return _isEnabled; }
   bool isConnected() const override;
+  bool bondJustSaved();  // once, a few seconds after a pairing: the framework saves the keys from its own task
   bool isWriteBusy() const override;
   size_t writeFrame(const uint8_t src[], size_t len) override;
   size_t checkRecvFrame(uint8_t dest[]) override;

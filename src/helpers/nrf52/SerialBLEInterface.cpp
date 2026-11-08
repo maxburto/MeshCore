@@ -82,12 +82,21 @@ bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t co
   return true;
 }
 
+uint32_t SerialBLEInterface::paired_at = 0;
+
+bool SerialBLEInterface::bondJustSaved() {
+  if (paired_at == 0 || millis() - paired_at < 3000) return false;
+  paired_at = 0;
+  return true;
+}
+
 void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t auth_status) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing complete handle=0x%04X status=%u", connection_handle, auth_status);
   if (instance) {
     if (instance->isValidConnection(connection_handle)) {
       if (auth_status == BLE_GAP_SEC_STATUS_SUCCESS) {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing successful");
+        paired_at = millis();
       } else {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing failed, disconnecting");
         instance->disconnect();

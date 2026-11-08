@@ -23,6 +23,10 @@ class DataStore {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   void checkAdvBlobFile();
 #endif
+#if defined(NRF52_PLATFORM)
+  void mirrorFile(const char* name);
+  void restoreFromMirror();
+#endif
 
 public:
   DataStore(FILESYSTEM& fs, mesh::RTCClock& clock);
@@ -40,6 +44,9 @@ public:
   void loadChannels(DataStoreHost* host);
   void saveChannels(DataStoreHost* host);
   void migrateToSecondaryFS();
+#if defined(NRF52_PLATFORM)
+  void mirrorBonds();
+#endif
   uint8_t getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]);
   bool putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len);
   bool deleteBlobByKey(const uint8_t key[], int key_len);

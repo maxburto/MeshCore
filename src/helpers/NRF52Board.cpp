@@ -4,12 +4,43 @@
 
 #include <bluefruit.h>
 #include <nrf_soc.h>
+#include <InternalFileSystem.h>
+#include <flash/flash_nrf5x.h>
+#include <wiring.h>
 
 #ifdef USE_CC310_HW_CRYPTO
 #include <Adafruit_nRFCrypto.h>
 #endif
 
 static BLEDfu bledfu;
+
+static Adafruit_LittleFS* flash_also = nullptr;
+
+void nrf52FlashQuiesceAlso(Adafruit_LittleFS* fs) { flash_also = fs; }
+
+static void flashQuiesceGaveUp(TimerHandle_t) { NVIC_SystemReset(); }
+
+void nrf52FlashQuiesce() {
+  static bool quiesced = false;
+  if (quiesced) return;  // the locks stay held from here on
+  quiesced = true;
+  static StaticTimer_t timer;  // a holder of the lock stuck for good must not stop the reset or USB flashing
+  xTimerStart(xTimerCreateStatic("flashq", pdMS_TO_TICKS(5000), pdFALSE, nullptr, flashQuiesceGaveUp, &timer), 0);
+  InternalFS._lockFS();
+  if (flash_also) flash_also->_lockFS();
+  flash_nrf5x_flush();
+}
+
+// USB's 1200-baud touch and the rest of the framework's ways into the bootloader reset at once, from their own task, so
+// each is wrapped at link time (-Wl,--wrap in platformio.ini's [nrf52_base]).
+extern "C" {
+void __real_enterSerialDfu(void);
+void __real_enterOTADfu(void);
+void __real_enterUf2Dfu(void);
+void __wrap_enterSerialDfu(void) { nrf52FlashQuiesce(); __real_enterSerialDfu(); }
+void __wrap_enterOTADfu(void) { nrf52FlashQuiesce(); __real_enterOTADfu(); }
+void __wrap_enterUf2Dfu(void) { nrf52FlashQuiesce(); __real_enterUf2Dfu(); }
+}
 
 static void connect_callback(uint16_t conn_handle) {
   (void)conn_handle;
@@ -158,6 +189,8 @@ void NRF52Board::enterSystemOff(uint8_t reason) {
   // Flush serial buffers
   Serial.flush();
   delay(100);
+
+  nrf52FlashQuiesce();
 
   // Enter SYSTEMOFF
   if (sd_enabled) {
@@ -379,6 +412,7 @@ void NRF52Board::shutdownPeripherals() {
 
 void NRF52Board::powerOff() {
   shutdownPeripherals();
+  nrf52FlashQuiesce();
 
   // Enter SYSTEMOFF
   uint8_t sd_enabled = 0;

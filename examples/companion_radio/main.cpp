@@ -169,6 +169,9 @@ void setup() {
   #else
   #if defined(EXTRAFS)
       ExtraFS.begin();
+    #if defined(NRF52_PLATFORM)
+      nrf52FlashQuiesceAlso(&ExtraFS);
+    #endif
   #endif
   #endif
   store.begin();
@@ -291,6 +294,9 @@ void setup() {
 
 void loop() {
   the_mesh.loop();
+#if defined(NRF52_PLATFORM) && defined(BLE_PIN_CODE)
+  if (bluetooth_interface.bondJustSaved()) store.mirrorBonds();
+#endif
   interface_manager.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS

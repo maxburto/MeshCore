@@ -46,6 +46,139 @@ static File openWrite(FILESYSTEM* fs, const char* filename) {
   static uint32_t _ContactsChannelsTotalBlocks = 0;
 #endif
 
+#if defined(NRF52_PLATFORM)
+/*
+ * What the radio cannot work without, kept in the second file system as well. A power cut or a fault during a flash write
+ * can still lose the internal file system whole (see nrf52FlashQuiesce): its first 4 KB page holds both superblock copies
+ * and the root directory, and the framework formats it when it will not mount. The flash layer writes one page at a time,
+ * so one cut cannot take both file systems.
+ *
+ * Copies only ever replace a file by rename, so each is whole or absent. A factory reset formats both file systems.
+ */
+#define MIRROR_DIR "/mirror"
+#define BOND_DIR "/adafruit/bond_prph"
+#define BOND_PREFIX "bond_"
+
+static bool sameBytes(FILESYSTEM* a_fs, const char* a_name, FILESYSTEM* b_fs, const char* b_name, bool bond_keys_only) {
+  File a = a_fs->open(a_name, FILE_O_READ);
+  File b = b_fs->open(b_name, FILE_O_READ);
+  bool same = a && b;
+  uint32_t left = 0;
+  if (same) {
+    left = a.size();
+    if (bond_keys_only) {  // the keys, a length byte first; the name and CCCD after them change without a new bond
+      left = 1 + (uint32_t) a.read();
+      a.seek(0);
+    } else if (b.size() != left) {
+      same = false;
+    }
+  }
+  uint8_t a_buf[32], b_buf[32];
+  while (same && left > 0) {
+    int want = left < sizeof(a_buf) ? left : sizeof(a_buf);
+    same = a.read(a_buf, want) == want && b.read(b_buf, want) == want && memcmp(a_buf, b_buf, want) == 0;
+    left -= want;
+  }
+  if (a) a.close();
+  if (b) b.close();
+  return same;
+}
+
+static bool copyWhole(FILESYSTEM* from_fs, const char* from, FILESYSTEM* to_fs, const char* to) {
+  static const char* TEMP = "/mirror.tmp";
+  to_fs->remove(TEMP);
+  File in = from_fs->open(from, FILE_O_READ);
+  File out = to_fs->open(TEMP, FILE_O_WRITE);
+  bool ok = in && out;
+  uint8_t buf[32];
+  int n;
+  while (ok && (n = in.read(buf, sizeof(buf))) > 0) {
+    ok = out.write(buf, n) == (size_t) n;
+  }
+  if (in) in.close();
+  if (out) out.close();
+  ok = ok && sameBytes(from_fs, from, to_fs, TEMP, false) && to_fs->rename(TEMP, to);
+  if (!ok) to_fs->remove(TEMP);
+  return ok;
+}
+
+void DataStore::mirrorFile(const char* name) {
+  if (_fsExtra == nullptr || !_fs->exists(name)) return;
+  char copy[32];
+  snprintf(copy, sizeof(copy), MIRROR_DIR "%s", name);
+  if (sameBytes(_fs, name, _fsExtra, copy, false)) return;
+  if (!_fsExtra->exists(MIRROR_DIR)) _fsExtra->mkdir(MIRROR_DIR);
+  copyWhole(_fs, name, _fsExtra, copy);
+}
+
+void DataStore::mirrorBonds() {
+  if (_fsExtra == nullptr) return;
+  if (!_fsExtra->exists(MIRROR_DIR)) _fsExtra->mkdir(MIRROR_DIR);
+  char from[48], to[48];
+
+  bool removed;  // a bond the radio no longer holds is not kept; each removal lists the directory again
+  do {
+    removed = false;
+    File copies = _fsExtra->open(MIRROR_DIR, FILE_O_READ);
+    if (!copies) break;
+    to[0] = 0;
+    while (File copy = copies.openNextFile()) {
+      const char* name = copy.name();
+      if (strncmp(name, BOND_PREFIX, strlen(BOND_PREFIX)) == 0) {
+        snprintf(from, sizeof(from), BOND_DIR "/%s", name + strlen(BOND_PREFIX));
+        if (!_fs->exists(from)) snprintf(to, sizeof(to), MIRROR_DIR "/%s", name);
+      }
+      copy.close();
+      if (to[0]) break;
+    }
+    copies.close();
+    if (to[0]) removed = _fsExtra->remove(to);
+  } while (removed);
+
+  File bonds = _fs->open(BOND_DIR, FILE_O_READ);
+  if (bonds) {
+    while (File bond = bonds.openNextFile()) {
+      char name[32];
+      strncpy(name, bond.name(), sizeof(name) - 1);
+      name[sizeof(name) - 1] = 0;
+      bond.close();
+      snprintf(from, sizeof(from), BOND_DIR "/%s", name);
+      snprintf(to, sizeof(to), MIRROR_DIR "/" BOND_PREFIX "%s", name);
+      if (!sameBytes(_fs, from, _fsExtra, to, true)) copyWhole(_fs, from, _fsExtra, to);
+    }
+    bonds.close();
+  }
+}
+
+// The identity goes back last: it is what says the rest is back, should this be cut short and run again.
+void DataStore::restoreFromMirror() {
+  if (_fsExtra == nullptr || !_fsExtra->exists(MIRROR_DIR)) return;
+  bool lost = !_fs->exists("/_main.id") && _fsExtra->exists(MIRROR_DIR "/_main.id");
+  if (lost) {
+    MESH_DEBUG_PRINTLN("DataStore: the internal file system was lost, restoring it");
+    if (!_fs->exists(BOND_DIR)) _fs->mkdir(BOND_DIR);
+    File copies = _fsExtra->open(MIRROR_DIR, FILE_O_READ);
+    if (copies) {
+      while (File copy = copies.openNextFile()) {
+        char name[32], from[48], to[48];
+        strncpy(name, copy.name(), sizeof(name) - 1);
+        name[sizeof(name) - 1] = 0;
+        copy.close();
+        if (strncmp(name, BOND_PREFIX, strlen(BOND_PREFIX)) != 0) continue;
+        snprintf(from, sizeof(from), MIRROR_DIR "/%s", name);
+        snprintf(to, sizeof(to), BOND_DIR "/%s", name + strlen(BOND_PREFIX));
+        copyWhole(_fsExtra, from, _fs, to);
+      }
+      copies.close();
+    }
+  }
+  if (!_fs->exists("/prefs.json") && _fsExtra->exists(MIRROR_DIR "/prefs.json")) {
+    copyWhole(_fsExtra, MIRROR_DIR "/prefs.json", _fs, "/prefs.json");
+  }
+  if (lost) copyWhole(_fsExtra, MIRROR_DIR "/_main.id", _fs, "/_main.id");
+}
+#endif
+
 void DataStore::begin() {
 #if defined(RP2040_PLATFORM)
   identity_store.begin();
@@ -56,6 +189,12 @@ void DataStore::begin() {
   checkAdvBlobFile();
   #if defined(EXTRAFS) || defined(QSPIFLASH)
   migrateToSecondaryFS();
+  #endif
+  #if defined(NRF52_PLATFORM)
+  restoreFromMirror();
+  mirrorFile("/_main.id");
+  mirrorFile("/prefs.json");
+  mirrorBonds();
   #endif
 #else
   // init 'blob store' support
@@ -186,7 +325,11 @@ bool DataStore::loadMainIdentity(mesh::LocalIdentity &identity) {
 }
 
 bool DataStore::saveMainIdentity(const mesh::LocalIdentity &identity) {
-  return identity_store.save("_main", identity);
+  bool saved = identity_store.save("_main", identity);
+#if defined(NRF52_PLATFORM)
+  if (saved) mirrorFile("/_main.id");
+#endif
+  return saved;
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs) {
@@ -251,6 +394,9 @@ bool DataStore::savePrefs(NodePrefs& _prefs) {
   if (file) {
     bool success = _prefs.saveSerial(file);
     file.close();
+#if defined(NRF52_PLATFORM)
+    if (success) mirrorFile("/prefs.json");
+#endif
     return success;
   }
   return false;
